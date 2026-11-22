@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid32269",
+  "B": "/home/dev/feedback/uid32269",
+  "sha": "6b347857021e501f62578fc5fde7c82967def9a3",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "pomerium",
+    "repo": "pomerium",
+    "sha": "6b347857021e501f62578fc5fde7c82967def9a3"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "pomerium",
+    "cloneUrl": "https://github.com/Rrr119/pomerium.git"
+  },
+  "at": "2026-11-22T04:44:03.853Z"
+}

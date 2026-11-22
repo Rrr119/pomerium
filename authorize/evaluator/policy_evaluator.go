@@ -17,6 +17,7 @@ import (
 	"github.com/pomerium/pomerium/pkg/cryptutil"
 	"github.com/pomerium/pomerium/pkg/policy"
 	"github.com/pomerium/pomerium/pkg/policy/criteria"
+	"github.com/pomerium/pomerium/pkg/policy/zerotrust"
 	"github.com/pomerium/pomerium/pkg/telemetry/trace"
 )
 
@@ -165,13 +166,13 @@ func NewPolicyEvaluator(
 	if addDefaultClientCertificateRule {
 		ppl.AddDefaultClientCertificateRule()
 	}
-	base, err := policy.GenerateRegoFromPolicy(ppl)
+	compiled, err := zerotrust.Compile(ppl)
 	if err != nil {
 		return nil, err
 	}
 
 	e.queries = []policyQuery{{
-		script: base,
+		script: compiled.Rego,
 	}}
 
 	// add any custom rego

@@ -11,12 +11,11 @@ import (
 	"net/url"
 
 	"github.com/google/uuid"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/pomerium/pomerium/internal/httputil"
+	"github.com/pomerium/pomerium/internal/log"
 	"github.com/pomerium/pomerium/internal/middleware"
 	"github.com/pomerium/pomerium/internal/sessions"
 	"github.com/pomerium/pomerium/internal/urlutil"
@@ -25,6 +24,7 @@ import (
 	"github.com/pomerium/pomerium/pkg/grpc/device"
 	"github.com/pomerium/pomerium/pkg/grpc/session"
 	"github.com/pomerium/pomerium/pkg/grpc/user"
+	"github.com/pomerium/pomerium/pkg/policy/zerotrust"
 	"github.com/pomerium/pomerium/pkg/webauthnutil"
 	"github.com/pomerium/pomerium/ui"
 	"github.com/pomerium/webauthn"
@@ -102,7 +102,8 @@ func (h *Handler) getOptions(r *http.Request, state *State, deviceTypeParam stri
 	}
 
 	// get the device credentials
-	knownDeviceCredentials, err := getKnownDeviceCredentials(r.Context(), state.Client, u.GetDeviceCredentialIds()...)
+	knownDeviceCredentials, err := getKnownDeviceCredentials(
+		r.Context(), state.Client, u.GetId(), u.GetDeviceCredentialIds()...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -179,7 +180,8 @@ func (h *Handler) handleAuthenticate(w http.ResponseWriter, r *http.Request, sta
 	deviceType := webauthnutil.GetDeviceType(ctx, state.Client, deviceTypeParam)
 
 	// get the device credentials
-	knownDeviceCredentials, err := getKnownDeviceCredentials(ctx, state.Client, u.GetDeviceCredentialIds()...)
+	knownDeviceCredentials, err := getKnownDeviceCredentials(
+		ctx, state.Client, u.GetId(), u.GetDeviceCredentialIds()...)
 	if err != nil {
 		return fmt.Errorf("error retrieving webauthn known device credentials: %w", err)
 	}
@@ -379,6 +381,22 @@ func (h *Handler) handleUnregister(w http.ResponseWriter, r *http.Request, state
 		return err
 	}
 
+	// A deleted device must not leave other sessions holding a usable device
+	// binding. Keep the session performing the unregister so it can complete
+	// and persist its updated credential list.
+	if _, err := zerotrust.NewSessionRevoker(state.Client).RevokeSessionsForDevice(
+		ctx,
+		u.GetId(),
+		deviceCredentialID,
+		state.Session.GetId(),
+	); err != nil {
+		log.Ctx(ctx).Error().
+			Err(err).
+			Str("user-id", u.GetId()).
+			Str("device-credential-id", deviceCredentialID).
+			Msg("webauthn: failed to revoke sessions bound to deleted device")
+	}
+
 	// remove the credential from the session
 	state.Session.RemoveDeviceCredentialID(deviceCredentialID)
 	return h.saveSessionAndRedirect(w, r, state, urlutil.GetAbsoluteURL(r).ResolveReference(&url.URL{
@@ -433,19 +451,32 @@ func (h *Handler) saveSessionAndRedirect(w http.ResponseWriter, r *http.Request,
 func getKnownDeviceCredentials(
 	ctx context.Context,
 	client databroker.DataBrokerServiceClient,
+	userID string,
 	deviceCredentialIDs ...string,
 ) ([]*device.Credential, error) {
 	var knownDeviceCredentials []*device.Credential
+	verifier := zerotrust.NewDeviceVerifier(client)
 	for _, deviceCredentialID := range deviceCredentialIDs {
-		deviceCredential, err := device.GetCredential(ctx, client, deviceCredentialID)
-		if status.Code(err) == codes.NotFound {
-			// ignore missing devices
+		verification, err := verifier.VerifyCredential(
+			ctx,
+			userID,
+			deviceCredentialID,
+			zerotrust.DeviceRequirement{},
+		)
+		if errors.Is(err, zerotrust.ErrDeviceUnauthenticated) ||
+			errors.Is(err, zerotrust.ErrDeviceUnauthorized) {
+			// Ignore credentials that no longer have a valid enrollment.
+			log.Ctx(ctx).Debug().
+				Err(err).
+				Str("user-id", userID).
+				Str("device-credential-id", deviceCredentialID).
+				Msg("webauthn: ignoring invalid device credential")
 			continue
 		} else if err != nil {
 			return nil, httputil.NewError(http.StatusInternalServerError,
 				fmt.Errorf("error retrieving device credential: %w", err))
 		}
-		knownDeviceCredentials = append(knownDeviceCredentials, deviceCredential)
+		knownDeviceCredentials = append(knownDeviceCredentials, verification.Credential)
 	}
 	return knownDeviceCredentials, nil
 }
